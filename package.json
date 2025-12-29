@@ -1,0 +1,35 @@
+{
+  "name": "seoblogbot",
+  "version": "1.0.0",
+  "description": "MCP server providing SEO audit tools for Next.js App Router blogs",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "seoblogbot": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["seo", "mcp", "claude-code", "nextjs", "sitemap"],
+  "author": "Chudi",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cheerio": "^1.0.0",
+    "fast-xml-parser": "^4.5.0",
+    "googleapis": "^140.0.0",
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}

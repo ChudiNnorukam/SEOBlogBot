@@ -1,0 +1,268 @@
+# SEO Validation GitHub Actions Workflow
+#
+# Runs SEO preflight checks on every PR to catch issues before production.
+# Blocks merge if CRITICAL issues are found.
+#
+# Usage:
+#   1. Copy to .github/workflows/seo-check.yml
+#   2. Configure secrets if using GSC API
+#   3. PRs will now show SEO status
+
+name: SEO Validation
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+# Cancel in-progress runs for same PR
+concurrency:
+  group: seo-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================================
+  # Job 1: Build and Deploy Preview
+  # ==========================================================================
+  build-preview:
+    name: Build Preview
+    runs-on: ubuntu-latest
+    outputs:
+      preview-url: ${{ steps.deploy.outputs.url }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SITE_URL: ${{ secrets.SITE_URL || 'https://preview.vercel.app' }}
+      
+      # Option 1: Vercel Preview Deployment
+      - name: Deploy to Vercel
+        id: deploy
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          # Don't deploy to production on PRs
+          vercel-args: '--prebuilt'
+      
+      # Option 2: Local server (if not using Vercel)
+      # - name: Start server
+      #   run: |
+      #     npm run start &
+      #     npx wait-on http://localhost:3000
+      #     echo "url=http://localhost:3000" >> $GITHUB_OUTPUT
+
+  # ==========================================================================
+  # Job 2: SEO Preflight Validation
+  # ==========================================================================
+  seo-preflight:
+    name: SEO Preflight
+    runs-on: ubuntu-latest
+    needs: build-preview
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Wait for deployment
+        run: npx wait-on ${{ needs.build-preview.outputs.preview-url }} --timeout 120000
+      
+      - name: Run SEO Preflight
+        id: seo
+        run: |
+          npx ts-node scripts/seo-preflight.ts ${{ needs.build-preview.outputs.preview-url }}
+        continue-on-error: true
+      
+      - name: Upload SEO Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: seo-report
+          path: seo-report.json
+          retention-days: 30
+      
+      - name: Comment PR with Results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('seo-report.json', 'utf8'));
+            
+            const statusEmoji = report.passed ? '✅' : '❌';
+            const summary = report.summary;
+            
+            let body = `## ${statusEmoji} SEO Preflight Results\n\n`;
+            body += `| Metric | Count |\n|--------|-------|\n`;
+            body += `| ✅ Passed | ${summary.passed} |\n`;
+            body += `| ❌ Failed | ${summary.failed} |\n`;
+            body += `| ⚠️ Warnings | ${summary.warnings} |\n\n`;
+            
+            if (report.criticalIssues.length > 0) {
+              body += `### 🚨 Critical Issues\n\n`;
+              report.criticalIssues.forEach(issue => {
+                body += `- **${issue.name}**: ${issue.message}\n`;
+                if (issue.fix) {
+                  body += `  - Fix: ${issue.fix}\n`;
+                }
+              });
+              body += '\n';
+            }
+            
+            body += `### Gate Results\n\n`;
+            report.gates.forEach(gate => {
+              const gateEmoji = gate.status === 'PASSED' ? '✅' : gate.status === 'WARNING' ? '⚠️' : '❌';
+              body += `- ${gateEmoji} **${gate.gate}**: ${gate.status} (${gate.duration}ms)\n`;
+            });
+            
+            body += `\n---\n*Preview URL: ${process.env.PREVIEW_URL}*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+        env:
+          PREVIEW_URL: ${{ needs.build-preview.outputs.preview-url }}
+      
+      - name: Check for Critical Issues
+        run: |
+          CRITICAL=$(cat seo-report.json | jq '.criticalIssues | length')
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::$CRITICAL critical SEO issues found"
+            exit 1
+          fi
+
+  # ==========================================================================
+  # Job 3: Lighthouse Audit (Optional)
+  # ==========================================================================
+  lighthouse:
+    name: Lighthouse Audit
+    runs-on: ubuntu-latest
+    needs: build-preview
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Run Lighthouse
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          urls: |
+            ${{ needs.build-preview.outputs.preview-url }}
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+          configPath: './.lighthouserc.json'
+      
+      - name: Assert Lighthouse Scores
+        run: |
+          # Fail if SEO score < 90
+          SEO_SCORE=$(cat .lighthouseci/lhr-*.json | jq '.categories.seo.score * 100' | head -1)
+          if (( $(echo "$SEO_SCORE < 90" | bc -l) )); then
+            echo "::error::Lighthouse SEO score is $SEO_SCORE (minimum: 90)"
+            exit 1
+          fi
+
+  # ==========================================================================
+  # Job 4: Sitemap Validation (Detailed)
+  # ==========================================================================
+  sitemap-check:
+    name: Sitemap Validation
+    runs-on: ubuntu-latest
+    needs: build-preview
+    
+    steps:
+      - name: Check Sitemap Accessibility
+        run: |
+          SITEMAP_URL="${{ needs.build-preview.outputs.preview-url }}/sitemap.xml"
+          
+          # Check HTTP status
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SITEMAP_URL")
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::Sitemap returned HTTP $STATUS"
+            exit 1
+          fi
+          
+          # Check content type
+          CONTENT_TYPE=$(curl -sI "$SITEMAP_URL" | grep -i "content-type" | cut -d' ' -f2)
+          if [[ ! "$CONTENT_TYPE" =~ xml ]]; then
+            echo "::error::Sitemap content-type is $CONTENT_TYPE (expected XML)"
+            exit 1
+          fi
+          
+          # Check URL count
+          URL_COUNT=$(curl -s "$SITEMAP_URL" | grep -c "<loc>")
+          if [ "$URL_COUNT" -eq 0 ]; then
+            echo "::error::Sitemap contains 0 URLs"
+            exit 1
+          fi
+          
+          echo "✅ Sitemap OK: $URL_COUNT URLs found"
+      
+      - name: Check Robots.txt
+        run: |
+          ROBOTS_URL="${{ needs.build-preview.outputs.preview-url }}/robots.txt"
+          
+          # Check accessibility
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$ROBOTS_URL")
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Robots.txt returned HTTP $STATUS"
+          fi
+          
+          # Check for sitemap reference
+          ROBOTS=$(curl -s "$ROBOTS_URL")
+          if ! echo "$ROBOTS" | grep -qi "sitemap:"; then
+            echo "::warning::Robots.txt does not reference sitemap"
+          fi
+          
+          # Check for blanket disallow
+          if echo "$ROBOTS" | grep -qE "^Disallow: /\s*$"; then
+            echo "::error::Robots.txt blocks all crawlers"
+            exit 1
+          fi
+          
+          echo "✅ Robots.txt OK"
+
+  # ==========================================================================
+  # Summary
+  # ==========================================================================
+  summary:
+    name: SEO Summary
+    runs-on: ubuntu-latest
+    needs: [seo-preflight, sitemap-check]
+    if: always()
+    
+    steps:
+      - name: Check Results
+        run: |
+          if [ "${{ needs.seo-preflight.result }}" == "failure" ] || \
+             [ "${{ needs.sitemap-check.result }}" == "failure" ]; then
+            echo "::error::SEO validation failed"
+            exit 1
+          fi
+          echo "✅ All SEO checks passed"
