@@ -7,50 +7,81 @@ export interface SchemaValidatorOptions {
   html: string;
   url: string;
   isArticlePage?: boolean;
+  mobileHtml?: string;
 }
 
-// Required fields for different schema types
+// Required/recommended fields for supported schema types (Google rich results)
 const SCHEMA_REQUIREMENTS: Record<string, { required: string[]; recommended: string[] }> = {
   Article: {
-    required: ['headline', '@type', '@context'],
-    recommended: ['image', 'datePublished', 'author', 'publisher'],
+    required: [],
+    recommended: ['headline', 'image', 'datePublished', 'dateModified', 'author'],
   },
   BlogPosting: {
-    required: ['headline', '@type', '@context'],
-    recommended: ['image', 'datePublished', 'author', 'publisher', 'mainEntityOfPage'],
+    required: [],
+    recommended: ['headline', 'image', 'datePublished', 'dateModified', 'author', 'publisher'],
   },
   NewsArticle: {
-    required: ['headline', '@type', '@context', 'datePublished'],
-    recommended: ['image', 'author', 'publisher'],
+    required: [],
+    recommended: ['headline', 'image', 'datePublished', 'dateModified', 'author', 'publisher'],
   },
   Organization: {
-    required: ['name', '@type', '@context'],
-    recommended: ['logo', 'url', 'sameAs'],
-  },
-  Person: {
-    required: ['name', '@type', '@context'],
-    recommended: ['url', 'image', 'sameAs', 'jobTitle'],
-  },
-  WebSite: {
-    required: ['name', '@type', '@context', 'url'],
-    recommended: ['potentialAction'],
-  },
-  WebPage: {
-    required: ['@type', '@context'],
-    recommended: ['name', 'description', 'url'],
+    required: [],
+    recommended: ['name', 'url', 'logo', 'sameAs'],
   },
   BreadcrumbList: {
-    required: ['@type', '@context', 'itemListElement'],
+    required: ['itemListElement'],
     recommended: [],
   },
   FAQPage: {
-    required: ['@type', '@context', 'mainEntity'],
+    required: ['mainEntity'],
     recommended: [],
   },
   HowTo: {
-    required: ['@type', '@context', 'name', 'step'],
+    required: ['name', 'step'],
     recommended: ['description', 'image', 'totalTime'],
   },
+};
+
+const extractVisibleText = (html: string): string => {
+  let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+  text = text.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, '');
+  text = text.replace(/<[^>]+>/g, ' ');
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.toLowerCase();
+};
+
+const normalizeSchemaItems = (parsed: unknown): unknown[] => {
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object') {
+    const graph = (parsed as { ['@graph']?: unknown })['@graph'];
+    if (Array.isArray(graph)) return graph;
+    if (graph) return [graph];
+    return [parsed];
+  }
+  return [];
+};
+
+const validateBreadcrumbItems = (itemListElement: unknown): string[] => {
+  const errors: string[] = [];
+  if (!Array.isArray(itemListElement)) {
+    errors.push('BreadcrumbList itemListElement should be an array');
+    return errors;
+  }
+  if (itemListElement.length < 2) {
+    errors.push('BreadcrumbList should contain at least two items');
+  }
+  for (const item of itemListElement) {
+    if (!item || typeof item !== 'object') {
+      errors.push('BreadcrumbList items must be ListItem objects');
+      continue;
+    }
+    const listItem = item as Record<string, unknown>;
+    if (!listItem.position) errors.push('BreadcrumbList ListItem missing position');
+    if (!listItem.name) errors.push('BreadcrumbList ListItem missing name');
+    if (!listItem.item) errors.push('BreadcrumbList ListItem missing item URL');
+  }
+  return errors;
 };
 
 /**
@@ -60,9 +91,10 @@ export function validateSchema(options: SchemaValidatorOptions): {
   checks: CheckResult[];
   schemas: SchemaValidation[];
 } {
-  const { html, url, isArticlePage = false } = options;
+  const { html, url, isArticlePage = false, mobileHtml } = options;
   const checks: CheckResult[] = [];
   const schemas: SchemaValidation[] = [];
+  const visibleText = extractVisibleText(html);
 
   // Find all JSON-LD scripts
   const jsonLdMatches = html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
@@ -93,35 +125,43 @@ export function validateSchema(options: SchemaValidatorOptions): {
   // Parse and validate each schema
   let validSchemas = 0;
   let invalidSchemas = 0;
+  const policyWarnings: string[] = [];
 
   for (let i = 0; i < jsonLdBlocks.length; i++) {
     const block = jsonLdBlocks[i];
-    const schemaValidation: SchemaValidation = {
-      type: 'Unknown',
-      hasContext: false,
-      requiredFields: [],
-      missingFields: [],
-      isValid: false,
-      errors: [],
-      raw: null,
-    };
-
     try {
       const parsed = JSON.parse(block);
-      schemaValidation.raw = parsed;
+      const schemaItems = normalizeSchemaItems(parsed);
+      for (const item of schemaItems) {
+        const schemaValidation: SchemaValidation = {
+          type: 'Unknown',
+          hasContext: false,
+          requiredFields: [],
+          missingFields: [],
+          recommendedFields: [],
+          missingRecommended: [],
+          policyWarnings: [],
+          isValid: false,
+          errors: [],
+          raw: item ?? null,
+        };
 
-      // Handle @graph structure
-      const schemaItems = parsed['@graph'] || [parsed];
+        if (!item || typeof item !== 'object') {
+          schemaValidation.errors.push('Schema item is not an object');
+          schemas.push(schemaValidation);
+          invalidSchemas++;
+          continue;
+        }
 
-      for (const item of Array.isArray(schemaItems) ? schemaItems : [schemaItems]) {
-        const type = item['@type'];
-        schemaValidation.type = Array.isArray(type) ? type[0] : type || 'Unknown';
+        const itemObj = item as Record<string, unknown>;
+        const type = itemObj['@type'];
+        schemaValidation.type = Array.isArray(type) ? (type[0] as string) : (type as string) || 'Unknown';
 
         // Check @context
-        const context = item['@context'] || parsed['@context'];
+        const context = itemObj['@context'] ?? (parsed as Record<string, unknown>)['@context'];
         schemaValidation.hasContext = context === 'https://schema.org' ||
                                       context === 'http://schema.org' ||
-                                      context?.includes?.('schema.org');
+                                      (typeof context === 'string' && context.includes('schema.org'));
 
         if (!schemaValidation.hasContext) {
           schemaValidation.errors.push('Missing or invalid @context');
@@ -132,45 +172,88 @@ export function validateSchema(options: SchemaValidatorOptions): {
           schemaValidation.errors.push('Missing @type');
         }
 
-        // Validate required fields for known types
+        // Validate required/recommended fields for known types
         const requirements = SCHEMA_REQUIREMENTS[schemaValidation.type];
         if (requirements) {
           schemaValidation.requiredFields = requirements.required;
+          schemaValidation.recommendedFields = requirements.recommended;
           for (const field of requirements.required) {
-            if (field !== '@type' && field !== '@context' && !item[field]) {
+            if (!itemObj[field]) {
               schemaValidation.missingFields.push(field);
+            }
+          }
+          for (const field of requirements.recommended) {
+            if (!itemObj[field]) {
+              schemaValidation.missingRecommended.push(field);
             }
           }
         }
 
         // Additional checks for specific types
-        if (schemaValidation.type === 'Article' || schemaValidation.type === 'BlogPosting') {
-          // Check for proper author structure
-          if (item.author && typeof item.author !== 'object') {
-            schemaValidation.errors.push('Author should be an object with @type and name');
+        if (schemaValidation.type === 'Article' ||
+            schemaValidation.type === 'BlogPosting' ||
+            schemaValidation.type === 'NewsArticle') {
+          const headline = itemObj.headline;
+          if (headline && typeof headline === 'string' && !visibleText.includes(headline.toLowerCase())) {
+            schemaValidation.policyWarnings?.push('Headline not found in visible content');
           }
-          // Check for proper image
-          if (!item.image) {
-            schemaValidation.errors.push('Articles should have an image property');
+          const author = itemObj.author as { name?: string } | undefined;
+          if (author?.name && typeof author.name === 'string' &&
+              !visibleText.includes(author.name.toLowerCase())) {
+            schemaValidation.policyWarnings?.push('Author name not found in visible content');
           }
         }
+
+        if (schemaValidation.type === 'Organization') {
+          const name = itemObj.name;
+          if (name && typeof name === 'string' && !visibleText.includes(name.toLowerCase())) {
+            schemaValidation.policyWarnings?.push('Organization name not found in visible content');
+          }
+        }
+
+        if (schemaValidation.type === 'BreadcrumbList') {
+          const breadcrumbErrors = validateBreadcrumbItems(itemObj.itemListElement);
+          schemaValidation.errors.push(...breadcrumbErrors);
+          if (Array.isArray(itemObj.itemListElement)) {
+            for (const entry of itemObj.itemListElement) {
+              if (entry && typeof entry === 'object') {
+                const name = (entry as Record<string, unknown>).name;
+                if (typeof name === 'string' && !visibleText.includes(name.toLowerCase())) {
+                  schemaValidation.policyWarnings?.push('Breadcrumb item not found in visible content');
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        schemaValidation.isValid = schemaValidation.errors.length === 0 &&
+                                    schemaValidation.missingFields.length === 0;
+
+        if (schemaValidation.policyWarnings && schemaValidation.policyWarnings.length > 0) {
+          policyWarnings.push(...schemaValidation.policyWarnings);
+        }
+
+        if (schemaValidation.isValid) {
+          validSchemas++;
+        } else {
+          invalidSchemas++;
+        }
+
+        schemas.push(schemaValidation);
       }
-
-      schemaValidation.isValid = schemaValidation.errors.length === 0 &&
-                                  schemaValidation.missingFields.length === 0;
-
-      if (schemaValidation.isValid) {
-        validSchemas++;
-      } else {
-        invalidSchemas++;
-      }
-
     } catch (error) {
-      schemaValidation.errors.push(`JSON parse error: ${error instanceof Error ? error.message : 'Unknown'}`);
-      invalidSchemas++;
+      schemas.push({
+        type: 'Unknown',
+        hasContext: false,
+        requiredFields: [],
+        missingFields: [],
+        isValid: false,
+        errors: [`JSON parse error: ${error instanceof Error ? error.message : 'Unknown'}`],
+        raw: null,
+      });
+      invalidSchemas += 1;
     }
-
-    schemas.push(schemaValidation);
   }
 
   // Report JSON parse errors
@@ -249,8 +332,32 @@ export function validateSchema(options: SchemaValidatorOptions): {
       name: 'Schema Required Fields',
       status: 'WARNING',
       severity: 'MEDIUM',
-      message: `Missing recommended fields: ${allMissing.join(', ')}`,
+      message: `Missing required fields: ${allMissing.join(', ')}`,
       fix: 'Add missing fields for richer search results',
+    });
+  }
+
+  const missingRecommendedSchemas = schemas.filter(s => (s.missingRecommended ?? []).length > 0);
+  if (missingRecommendedSchemas.length > 0) {
+    const allMissing = [
+      ...new Set(missingRecommendedSchemas.flatMap(s => s.missingRecommended ?? [])),
+    ];
+    checks.push({
+      name: 'Schema Recommended Fields',
+      status: 'WARNING',
+      severity: 'LOW',
+      message: `Missing recommended fields: ${allMissing.join(', ')}`,
+      fix: 'Add recommended fields to improve rich result eligibility',
+    });
+  }
+
+  if (policyWarnings.length > 0) {
+    checks.push({
+      name: 'Structured Data Policy',
+      status: 'WARNING',
+      severity: 'MEDIUM',
+      message: `Potential policy mismatches: ${[...new Set(policyWarnings)].slice(0, 5).join('; ')}`,
+      fix: 'Ensure structured data reflects visible page content',
     });
   }
 
@@ -269,6 +376,57 @@ export function validateSchema(options: SchemaValidatorOptions): {
       severity: 'MEDIUM',
       message: `${validSchemas} valid schema(s)`,
     });
+  }
+
+  // Mobile parity for schema types
+  if (mobileHtml) {
+    const mobileMatches = mobileHtml.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+    const mobileBlocks: string[] = [];
+    for (const match of mobileMatches) {
+      mobileBlocks.push(match[1]);
+    }
+    const desktopTypes = schemas.map(s => s.type).filter(Boolean);
+    const mobileTypes: string[] = [];
+
+    for (const block of mobileBlocks) {
+      try {
+        const parsed = JSON.parse(block);
+        const items = normalizeSchemaItems(parsed);
+        for (const item of items) {
+          if (item && typeof item === 'object') {
+            const type = (item as Record<string, unknown>)['@type'];
+            const typeValue = Array.isArray(type) ? type[0] : type;
+            if (typeof typeValue === 'string') {
+              mobileTypes.push(typeValue);
+            }
+          }
+        }
+      } catch {
+        // Ignore mobile schema parse errors here; already handled in main validation
+      }
+    }
+
+    const missingOnMobile = desktopTypes.filter((type) => !mobileTypes.includes(type));
+    const extraOnMobile = mobileTypes.filter((type) => !desktopTypes.includes(type));
+    if (missingOnMobile.length > 0 || extraOnMobile.length > 0) {
+      checks.push({
+        name: 'Mobile Schema Parity',
+        status: 'WARNING',
+        severity: 'MEDIUM',
+        message: `Schema types differ between desktop and mobile`,
+        details: {
+          missingOnMobile: [...new Set(missingOnMobile)],
+          extraOnMobile: [...new Set(extraOnMobile)],
+        },
+      });
+    } else if (desktopTypes.length > 0) {
+      checks.push({
+        name: 'Mobile Schema Parity',
+        status: 'PASSED',
+        severity: 'LOW',
+        message: 'Desktop and mobile schema types match',
+      });
+    }
   }
 
   return { checks, schemas };

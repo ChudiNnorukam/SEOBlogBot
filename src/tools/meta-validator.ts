@@ -11,6 +11,7 @@ const TITLE_MIN = 30;
 const TITLE_MAX = 60;
 const DESC_MIN = 120;
 const DESC_MAX = 160;
+const HREFLANG_PATTERN = /^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/;
 
 export function registerValidateMetaTagsTool(server: McpServer): void {
   server.registerTool(
@@ -168,12 +169,70 @@ async function validateMetaTags(url: string): Promise<MetaTagsResult> {
     if (robotsMeta.toLowerCase().includes('noindex')) {
       issues.push('Meta robots tag contains "noindex" - page will NOT be indexed!');
     }
+    if (robotsMeta.toLowerCase().includes('nofollow')) {
+      issues.push('Meta robots tag contains "nofollow" - links may not pass PageRank.');
+    }
   }
 
   // Check viewport for mobile
   const viewport = $('meta[name="viewport"]').attr('content');
   if (!viewport) {
     issues.push('Missing viewport meta tag - page may not be mobile-friendly');
+  }
+
+  // Check hreflang tags
+  const hreflangLinks = $('link[rel~="alternate"][hreflang]').toArray();
+  if (hreflangLinks.length > 0) {
+    let missingHrefCount = 0;
+    let invalidLangCount = 0;
+    let nonAbsoluteCount = 0;
+    let duplicateCount = 0;
+    const seen = new Map<string, Set<string>>();
+    const hasXDefault = hreflangLinks.some((el) =>
+      ($(el).attr('hreflang') ?? '').toLowerCase() === 'x-default'
+    );
+
+    for (const el of hreflangLinks) {
+      const hreflang = $(el).attr('hreflang')?.trim() ?? '';
+      const href = $(el).attr('href')?.trim() ?? '';
+
+      if (hreflang && hreflang.toLowerCase() !== 'x-default' && !HREFLANG_PATTERN.test(hreflang)) {
+        invalidLangCount += 1;
+      }
+
+      if (!href) {
+        missingHrefCount += 1;
+      } else if (!/^https?:\/\//i.test(href)) {
+        nonAbsoluteCount += 1;
+      }
+
+      if (!seen.has(hreflang)) {
+        seen.set(hreflang, new Set());
+      }
+      if (href) {
+        const bucket = seen.get(hreflang)!;
+        if (bucket.size > 0 && !bucket.has(href)) {
+          duplicateCount += 1;
+        }
+        bucket.add(href);
+      }
+    }
+
+    if (missingHrefCount > 0) {
+      issues.push(`${missingHrefCount} hreflang links are missing href`);
+    }
+    if (nonAbsoluteCount > 0) {
+      issues.push(`${nonAbsoluteCount} hreflang links use non-absolute URLs`);
+    }
+    if (invalidLangCount > 0) {
+      issues.push(`${invalidLangCount} hreflang values are invalid`);
+    }
+    if (duplicateCount > 0) {
+      issues.push(`${duplicateCount} duplicate hreflang entries found`);
+    }
+    if (hreflangLinks.length > 1 && !hasXDefault) {
+      issues.push('Missing x-default hreflang for internationalized pages');
+    }
   }
 
   return {

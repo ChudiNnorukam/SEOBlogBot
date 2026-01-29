@@ -77,7 +77,7 @@ SEOBlogBot uses the same gate-based validation architecture as MicroSaaSBot v3, 
 
 ---
 
-## Gates (6 Total)
+## Gates (8 Total)
 
 ### Gate 1: Sitemap Accessibility
 **File:** `gates/sitemap-gate.md`
@@ -149,7 +149,27 @@ SEOBlogBot uses the same gate-based validation architecture as MicroSaaSBot v3, 
 | X-Robots-Tag | No noindex in production headers | 🛑 BLOCKED |
 | Preview Env Protected | noindex on non-production | ⚠️ WARNING |
 
-### Gate 6: Core Web Vitals
+### Gate 6: Rendering Parity
+**File:** `gates/rendering-gate.md`
+**Script:** `scripts/validators/validate-rendering.ts`
+
+| Check | Criteria | Failure = |
+|-------|----------|-----------|
+| Rendered vs HTML parity | Rendered content roughly matches HTML | ⚠️ WARNING |
+
+### Gate 7: Lighthouse Checklist
+**File:** `gates/lighthouse-gate.md`
+**Script:** `scripts/validators/validate-lighthouse.ts`
+
+| Check | Criteria | Failure = |
+|-------|----------|-----------|
+| Lighthouse Performance | Score >= 90 | ⚠️ WARNING |
+| Lighthouse Accessibility | Score >= 90 | ⚠️ WARNING |
+| Lighthouse Best Practices | Score >= 90 | ⚠️ WARNING |
+| Lighthouse SEO | Score >= 90 | ⚠️ WARNING |
+| Lighthouse PWA | Score >= 90 | ⚠️ WARNING |
+
+### Gate 8: Core Web Vitals
 **File:** `gates/cwv-gate.md`
 **Script:** `scripts/validate-cwv.ts`
 
@@ -169,7 +189,7 @@ SEOBlogBot uses the same gate-based validation architecture as MicroSaaSBot v3, 
 claude "/audit https://chudi-blog.vercel.app"
 ```
 
-Runs all 6 gates and produces a report with:
+Runs all 8 gates and produces a report with:
 - Pass/Fail status for each check
 - Specific issues found
 - Fix recommendations with code snippets
@@ -336,7 +356,7 @@ User Request
     │                                        ├─► Gate 3: Meta ─────► FAIL? ──► Fix metadata
     │                                        ├─► Gate 4: Canonical ► FAIL? ──► Add canonicals
     │                                        ├─► Gate 5: Crawl ────► FAIL? ──► Fix robots.txt
-    │                                        └─► Gate 6: CWV ──────► FAIL? ──► Optimize perf
+    │                                        └─► Gate 8: CWV ──────► FAIL? ──► Optimize perf
     │
     ├─► "fix sitemap" ────────────────► Generate app/sitemap.ts template
     │

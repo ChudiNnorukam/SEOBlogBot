@@ -2,6 +2,7 @@
 // Robots.txt and crawlability validation module
 
 import type { CheckResult } from '../../lib/types';
+import { parseRobotsTxt, pickRobotsGroup, evaluateRobotsRules } from '../utils/robots';
 
 export interface CrawlabilityValidatorOptions {
   baseUrl: string;
@@ -20,6 +21,8 @@ export interface RobotsAnalysis {
 }
 
 const AI_CRAWLERS = ['GPTBot', 'ClaudeBot', 'PerplexityBot', 'ChatGPT-User', 'Google-Extended'];
+const MAX_ROBOTS_SIZE_BYTES = 500 * 1024;
+const ROBOTS_TEST_USER_AGENT = 'Googlebot';
 
 /**
  * Validate robots.txt and crawlability
@@ -72,6 +75,24 @@ export async function validateCrawlability(options: CrawlabilityValidatorOptions
       });
 
       const text = await response.text();
+      const robotsSizeBytes = Buffer.byteLength(text, 'utf8');
+
+      if (robotsSizeBytes > MAX_ROBOTS_SIZE_BYTES) {
+        checks.push({
+          name: 'Robots.txt File Size',
+          status: 'WARNING',
+          severity: 'MEDIUM',
+          message: `robots.txt is ${(robotsSizeBytes / 1024).toFixed(1)}KB (Google limit is 500KB)`,
+          fix: 'Reduce robots.txt size to <= 500KB',
+        });
+      } else {
+        checks.push({
+          name: 'Robots.txt File Size',
+          status: 'PASSED',
+          severity: 'LOW',
+          message: `${(robotsSizeBytes / 1024).toFixed(1)}KB`,
+        });
+      }
 
       // Check for blanket block
       const lines = text.split('\n').map(l => l.trim());
@@ -83,17 +104,20 @@ export async function validateCrawlability(options: CrawlabilityValidatorOptions
         } else if (line.toLowerCase().startsWith('disallow:')) {
           const path = line.split(':')[1]?.trim() || '';
           analysis.disallowedPaths.push(`${currentUserAgent}: ${path}`);
-
-          // Check for blanket block on * user agent
-          if ((currentUserAgent === '*' || currentUserAgent === '') &&
-              (path === '/' || path === '/*')) {
-            analysis.hasBlanketBlock = true;
-          }
         } else if (line.toLowerCase().startsWith('allow:')) {
           const path = line.split(':')[1]?.trim() || '';
           analysis.allowedPaths.push(`${currentUserAgent}: ${path}`);
         } else if (line.toLowerCase().startsWith('sitemap:')) {
           analysis.hasSitemapDirective = true;
+        }
+      }
+
+      const groups = parseRobotsTxt(text);
+      const group = pickRobotsGroup(ROBOTS_TEST_USER_AGENT, groups) ?? pickRobotsGroup('*', groups);
+      if (group) {
+        const ruleCheck = evaluateRobotsRules('/', group.rules);
+        if (!ruleCheck.allowed) {
+          analysis.hasBlanketBlock = true;
         }
       }
 

@@ -11,7 +11,11 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "validate:sitemap-conflicts": "npx tsx scripts/validators/validate-sitemap-conflicts.ts",
+    "monitor:sitemap": "npx tsx scripts/utils/monitor-sitemap.ts",
+    "audit": "npx tsx scripts/seo-preflight.ts",
+    "verify": "npm run typecheck && npm run validate:sitemap-conflicts"
   },
   "keywords": ["seo", "mcp", "claude-code", "nextjs", "sitemap"],
   "author": "Chudi",

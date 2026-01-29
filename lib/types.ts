@@ -91,6 +91,7 @@ export interface PageAnalysis {
   metadata: PageMetadata;
   schemas: SchemaValidation[];
   wordCount: number;
+  contentHash?: string;
   headingStructure: {
     h1: string[];
     h2: string[];
@@ -112,6 +113,9 @@ export interface SchemaValidation {
   hasContext: boolean;
   requiredFields: string[];
   missingFields: string[];
+  recommendedFields?: string[];
+  missingRecommended?: string[];
+  policyWarnings?: string[];
   isValid: boolean;
   errors: string[];
   raw: unknown;
@@ -217,7 +221,9 @@ export interface SEOBlogBotConfig {
     metadata: boolean;
     schema: boolean;
     canonical: boolean;
+    lighthouse?: boolean;
     performance: boolean;
+    rendering?: boolean;
   };
 }
 
@@ -243,7 +249,9 @@ export const DEFAULT_CONFIG: SEOBlogBotConfig = {
     metadata: true,
     schema: true,
     canonical: true,
+    lighthouse: false,
     performance: false, // Requires additional setup
+    rendering: false,
   },
 };
 
@@ -265,4 +273,5 @@ export interface CrawlResult {
   totalPages: number;
   duration: number;
   errors: string[];
+  blockedUrls?: string[];
 }

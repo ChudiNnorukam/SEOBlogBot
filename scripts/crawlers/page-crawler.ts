@@ -2,9 +2,11 @@
 // Multi-page crawler for comprehensive SEO validation
 
 import type { CheckResult, PageAnalysis, CrawlOptions, CrawlResult, SitemapEntry } from '../../lib/types';
+import { createHash } from 'node:crypto';
 import { validateMeta } from '../validators/validate-meta';
 import { validateCanonical } from '../validators/validate-canonical';
 import { validateSchema } from '../validators/validate-schema';
+import { parseRobotsTxt, pickRobotsGroup, evaluateRobotsRules } from '../utils/robots';
 
 const DEFAULT_CRAWL_OPTIONS: CrawlOptions = {
   maxPages: 20,
@@ -108,15 +110,62 @@ function extractHeadings(html: string): { h1: string[]; h2: string[]; h3: string
  * Count words in page content (excluding scripts and styles)
  */
 function countWords(html: string): number {
-  // Remove scripts and styles
+  const text = extractVisibleText(html);
+  return text.split(' ').filter(w => w.length > 0).length;
+}
+
+/**
+ * Extract visible text for content comparisons
+ */
+function extractVisibleText(html: string): string {
   let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
   text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-  // Remove HTML tags
+  text = text.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, '');
   text = text.replace(/<[^>]+>/g, ' ');
-  // Remove extra whitespace
   text = text.replace(/\s+/g, ' ').trim();
-  // Count words
-  return text.split(' ').filter(w => w.length > 0).length;
+  return text;
+}
+
+function normalizeUrl(url: string): string {
+  return url.replace(/\/$/, '');
+}
+
+async function buildRobotsEvaluator(
+  baseUrl: string,
+  userAgent: string,
+  timeout: number
+): Promise<((url: string) => { allowed: boolean; rule?: string }) | null> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/robots.txt`, {
+      headers: { 'User-Agent': userAgent },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) return null;
+
+    const text = await response.text();
+    const groups = parseRobotsTxt(text);
+    const group = pickRobotsGroup(userAgent, groups) ?? pickRobotsGroup('*', groups);
+    if (!group) return null;
+
+    return (url: string) => {
+      try {
+        const parsed = new URL(url);
+        const path = `${parsed.pathname}${parsed.search}`;
+        const evaluation = evaluateRobotsRules(path, group.rules);
+        return {
+          allowed: evaluation.allowed,
+          rule: evaluation.matchedRule ? `${evaluation.matchedRule.type}:${evaluation.matchedRule.path}` : undefined,
+        };
+      } catch {
+        return { allowed: true };
+      }
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -157,7 +206,11 @@ export async function analyzePage(
   const links = extractLinks(html, url);
   const images = extractImages(html);
   const headings = extractHeadings(html);
-  const wordCount = countWords(html);
+  const visibleText = extractVisibleText(html);
+  const wordCount = visibleText.split(' ').filter(w => w.length > 0).length;
+  const contentHash = visibleText
+    ? createHash('sha256').update(visibleText.toLowerCase()).digest('hex')
+    : undefined;
 
   // Collect issues
   const issues: PageAnalysis['issues'] = [];
@@ -214,6 +267,7 @@ export async function analyzePage(
     metadata,
     schemas,
     wordCount,
+    contentHash,
     headingStructure: headings,
     internalLinks: links.internal,
     externalLinks: links.external,
@@ -235,12 +289,23 @@ export async function crawlFromSitemap(
   const startTime = Date.now();
   const pages: PageAnalysis[] = [];
   const errors: string[] = [];
+  const blockedUrls: string[] = [];
+  const robotsEvaluator = opts.respectRobots
+    ? await buildRobotsEvaluator(baseUrl, opts.userAgent, opts.timeout)
+    : null;
 
   // Limit to maxPages
   const urlsToCrawl = sitemapUrls.slice(0, opts.maxPages);
 
   for (const entry of urlsToCrawl) {
     try {
+      if (robotsEvaluator) {
+        const evaluation = robotsEvaluator(entry.url);
+        if (!evaluation.allowed) {
+          blockedUrls.push(entry.url);
+          continue;
+        }
+      }
       const analysis = await analyzePage(entry.url, opts);
       pages.push(analysis);
     } catch (error) {
@@ -253,6 +318,7 @@ export async function crawlFromSitemap(
     totalPages: pages.length,
     duration: Date.now() - startTime,
     errors,
+    blockedUrls: blockedUrls.length > 0 ? blockedUrls : undefined,
   };
 }
 
@@ -267,8 +333,13 @@ export async function crawlByLinks(
   const startTime = Date.now();
   const pages: PageAnalysis[] = [];
   const errors: string[] = [];
+  const blockedUrls: string[] = [];
   const visited = new Set<string>();
   const queue: string[] = [startUrl];
+  const baseUrl = new URL(startUrl).origin;
+  const robotsEvaluator = opts.respectRobots
+    ? await buildRobotsEvaluator(baseUrl, opts.userAgent, opts.timeout)
+    : null;
 
   while (queue.length > 0 && pages.length < opts.maxPages) {
     const url = queue.shift()!;
@@ -279,6 +350,13 @@ export async function crawlByLinks(
     visited.add(normalizedUrl);
 
     try {
+      if (robotsEvaluator) {
+        const evaluation = robotsEvaluator(url);
+        if (!evaluation.allowed) {
+          blockedUrls.push(url);
+          continue;
+        }
+      }
       const analysis = await analyzePage(url, opts);
       pages.push(analysis);
 
@@ -301,6 +379,7 @@ export async function crawlByLinks(
     totalPages: pages.length,
     duration: Date.now() - startTime,
     errors,
+    blockedUrls: blockedUrls.length > 0 ? blockedUrls : undefined,
   };
 }
 
@@ -309,6 +388,51 @@ export async function crawlByLinks(
  */
 export function generateCrawlSummaryChecks(result: CrawlResult): CheckResult[] {
   const checks: CheckResult[] = [];
+
+  const normalizedPages = result.pagesAnalyzed.map((page) => ({
+    url: page.url,
+    normalized: normalizeUrl(page.url),
+  }));
+  const pageLookup = new Map<string, string>();
+  for (const page of normalizedPages) {
+    pageLookup.set(page.normalized, page.url);
+  }
+
+  const inboundCounts = new Map<string, number>();
+  for (const page of normalizedPages) {
+    inboundCounts.set(page.normalized, 0);
+  }
+
+  for (const page of result.pagesAnalyzed) {
+    for (const link of page.internalLinks) {
+      const normalizedLink = normalizeUrl(link);
+      if (inboundCounts.has(normalizedLink)) {
+        inboundCounts.set(normalizedLink, (inboundCounts.get(normalizedLink) ?? 0) + 1);
+      }
+    }
+  }
+
+  const homepageNormalized = normalizedPages.find((page) => {
+    try {
+      return new URL(page.url).pathname === '/';
+    } catch {
+      return false;
+    }
+  })?.normalized;
+
+  const orphanPages = [...inboundCounts.entries()]
+    .filter(([normalized, count]) => count === 0 && normalized !== homepageNormalized)
+    .map(([normalized]) => pageLookup.get(normalized))
+    .filter((url): url is string => Boolean(url));
+
+  const contentHashes = new Map<string, string[]>();
+  for (const page of result.pagesAnalyzed) {
+    if (!page.contentHash) continue;
+    const list = contentHashes.get(page.contentHash) ?? [];
+    list.push(page.url);
+    contentHashes.set(page.contentHash, list);
+  }
+  const duplicateGroups = [...contentHashes.values()].filter((group) => group.length > 1);
 
   // Check for pages with issues
   const pagesWithThinContent = result.pagesAnalyzed.filter(p =>
@@ -388,6 +512,44 @@ export function generateCrawlSummaryChecks(result: CrawlResult): CheckResult[] {
       severity: 'HIGH',
       message: `${pagesWithNoDescription.length} page(s) missing meta description`,
       details: { urls: pagesWithNoDescription.map(p => p.url) },
+    });
+  }
+
+  if (orphanPages.length > 0) {
+    checks.push({
+      name: 'Orphan Pages',
+      status: 'WARNING',
+      severity: 'MEDIUM',
+      message: `${orphanPages.length} page(s) have no internal links pointing to them`,
+      details: { urls: orphanPages.slice(0, 10) },
+    });
+  } else if (result.pagesAnalyzed.length > 1) {
+    checks.push({
+      name: 'Orphan Pages',
+      status: 'PASSED',
+      severity: 'LOW',
+      message: 'All crawled pages have at least one internal link',
+    });
+  }
+
+  if (duplicateGroups.length > 0) {
+    const samples = duplicateGroups.slice(0, 3).map((group) => group.slice(0, 3));
+    checks.push({
+      name: 'Duplicate Content',
+      status: 'WARNING',
+      severity: 'MEDIUM',
+      message: `${duplicateGroups.length} duplicate content group(s) detected`,
+      details: { samples },
+    });
+  }
+
+  if (result.blockedUrls && result.blockedUrls.length > 0) {
+    checks.push({
+      name: 'Robots.txt Blocks (Crawl)',
+      status: 'WARNING',
+      severity: 'MEDIUM',
+      message: `${result.blockedUrls.length} URL(s) skipped due to robots.txt`,
+      details: { urls: result.blockedUrls.slice(0, 10) },
     });
   }
 

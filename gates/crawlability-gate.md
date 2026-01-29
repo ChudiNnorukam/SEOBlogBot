@@ -14,10 +14,35 @@
 | Sitemap XML Structure | CRITICAL | Contains `<urlset>` or `<?xml` |
 | Sitemap URL Count | CRITICAL | > 0 URLs |
 | Sitemap lastmod Tags | MEDIUM | Present for freshness signals |
+| Sitemap URLs Blocked by robots.txt | HIGH | Sitemap URLs not disallowed |
+| Sitemap Encoding | LOW | UTF-8 declared or assumed |
 | Robots.txt Status | MEDIUM | Returns 200 OK |
 | Robots.txt No Blanket Block | CRITICAL | No `Disallow: /` for all agents |
 | Robots.txt Sitemap Reference | MEDIUM | Contains `Sitemap:` directive |
 | AI Crawler Permissions | LOW | Allows GPTBot, ClaudeBot |
+| Robots.txt File Size | MEDIUM | <= 500KB |
+
+---
+
+## Google Sitemaps Error List Coverage (as of Jan 1, 2026)
+
+| GSC Error | SEOBlogBot Check | Auto? | Notes |
+|-----------|------------------|-------|-------|
+| General HTTP errors | Sitemap HTTP Status | Yes | 4xx/5xx blocked |
+| General network errors | Sitemap Fetch | Yes | DNS/timeout |
+| Invalid XML | Sitemap XML Structure | Yes | Must be <urlset> or <sitemapindex> |
+| Too many sitemaps | Too Many Sitemaps | Yes | > 50,000 entries in index |
+| Too many URLs | Too Many URLs | Yes | > 50,000 URLs in a sitemap |
+| File size | Sitemap File Size | Yes | > 50MB uncompressed |
+| Missing XML tag | Missing XML tag | Yes | Missing <loc> |
+| Invalid tag value | Invalid Tag Value | Yes | Invalid changefreq/priority |
+| Invalid date | Invalid Date | Yes | Invalid lastmod |
+| Invalid URL | Invalid URL | Yes | Non-absolute or malformed |
+| Invalid URL in sitemap index file | Invalid URL / Incomplete URL | Yes | Index <loc> must be absolute |
+| Nested sitemap indexes | Nested Sitemap Indexes | Partial | Checks first 10 child sitemaps |
+| URL not allowed | URL Not Allowed | Yes | Host/path scope mismatch |
+| Path mismatch (www) | Path Mismatch (www) | Yes | www vs non-www mismatch |
+| URLs blocked by robots.txt | Robots.txt Blanket Block | Partial | Per-URL disallow requires manual or crawl check |
 
 ---
 

@@ -61,6 +61,24 @@ curl -sI https://chudi-blog.vercel.app/sitemap.xml
 
 ---
 
+## Google Search Console Error List (Quick Fixes)
+
+If GSC shows one of these errors, map it to the corresponding fix:
+
+- **General HTTP errors / Couldn't fetch** → Fix sitemap route or middleware; ensure 200 OK
+- **General network errors** → Check DNS, TLS, and hosting uptime
+- **Invalid XML** → Make sure `/sitemap.xml` returns XML, not HTML/error pages
+- **Too many URLs / Too many sitemaps** → Split sitemap and create a sitemap index
+- **File size** → Keep uncompressed sitemap under 50MB; split if needed
+- **Missing XML tag** → Ensure every `<url>` or `<sitemap>` has `<loc>`
+- **Invalid tag value** → Use valid `changefreq` values and `priority` between 0.0–1.0
+- **Invalid date** → Use ISO 8601 or `YYYY-MM-DD` for `lastmod`
+- **Invalid URL / URL not allowed** → Only include absolute URLs on the same host and path scope
+- **Path mismatch (www)** → Make sitemap host consistent with canonical host
+- **Nested sitemap indexes** → Index files should only list URL sitemaps, not other indexes
+
+---
+
 ## Step 2: Check for Existing Sitemap File
 
 ```bash

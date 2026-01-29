@@ -1,0 +1,28 @@
+#!/bin/sh
+# Pre-commit hook for SEOBlogBot
+# Validates critical configurations before committing
+
+echo "🔍 Running pre-commit checks...\n"
+
+# 1. Validate sitemap configuration
+echo "✓ Checking sitemap conflicts..."
+npm run validate:sitemap-conflicts || {
+  echo "\n❌ Sitemap validation failed!"
+  echo "   Fix issues above or see: npm run validate:sitemap-conflicts"
+  exit 1
+}
+
+# 2. Ensure no conflict files
+echo "✓ Checking for conflicting files..."
+if [[ -f static/sitemap.xml && -f src/routes/sitemap.xml/+server.ts ]]; then
+  echo "\n❌ Conflict: Both static and dynamic sitemaps exist!"
+  echo "   Delete static/sitemap.xml to prevent override"
+  exit 1
+fi
+
+# 3. Type check
+echo "✓ Type checking..."
+npm run check || exit 1
+
+echo "\n✅ All pre-commit checks passed!"
+exit 0

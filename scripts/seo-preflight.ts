@@ -26,6 +26,8 @@ import { validateMeta } from './validators/validate-meta';
 import { validateCanonical } from './validators/validate-canonical';
 import { validateSchema } from './validators/validate-schema';
 import { validatePerformance } from './validators/validate-performance';
+import { validateRendering } from './validators/validate-rendering';
+import { validateLighthouse } from './validators/validate-lighthouse';
 import {
   crawlFromSitemap,
   crawlByLinks,
@@ -59,8 +61,26 @@ const CONFIG: SEOBlogBotConfig = {
     schema: true,
     canonical: true,
     performance: true,
+    rendering: true,
   },
 };
+
+const MOBILE_USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 10; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+const extractVisibleText = (html: string): string => {
+  let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+  text = text.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, '');
+  text = text.replace(/<[^>]+>/g, ' ');
+  text = text.replace(/\s+/g, ' ').trim();
+  return text;
+};
+
+const countVisibleWords = (html: string): number =>
+  extractVisibleText(html)
+    .split(' ')
+    .filter((word) => word.length > 0).length;
 
 // ============================================================================
 // Gate Runner
@@ -116,6 +136,7 @@ interface PreflightOptions {
   crawlPages?: boolean;
   maxPages?: number;
   includePerformance?: boolean;
+  includeLighthouse?: boolean;
   jsonOutput?: boolean;
   verbose?: boolean;
 }
@@ -128,6 +149,7 @@ async function runSEOPreflight(
     crawlPages = false,
     maxPages = 10,
     includePerformance = true,
+    includeLighthouse = true,
     verbose = true,
   } = options;
 
@@ -147,7 +169,7 @@ async function runSEOPreflight(
   let sitemapUrls: { url: string; lastModified?: string }[] = [];
 
   // Gate 1: Sitemap
-  if (verbose) console.log('Gate 1/6: Sitemap Validation...');
+  if (verbose) console.log('Gate 1/8: Sitemap Validation...');
   const sitemapGate = await runGate('Sitemap', async () => {
     const { checks, analysis } = await validateSitemap(validatorOptions);
     sitemapUrls = analysis.entries;
@@ -157,7 +179,7 @@ async function runSEOPreflight(
   if (verbose) printGateResult(sitemapGate);
 
   // Gate 2: Crawlability
-  if (verbose) console.log('Gate 2/6: Crawlability...');
+  if (verbose) console.log('Gate 2/8: Crawlability...');
   const crawlGate = await runGate('Crawlability', async () => {
     const { checks } = await validateCrawlability(validatorOptions);
     return checks;
@@ -167,6 +189,7 @@ async function runSEOPreflight(
 
   // Fetch homepage for remaining gates
   let homepageHtml = '';
+  let mobileHtml = '';
   try {
     const response = await fetch(baseUrl, {
       headers: { 'User-Agent': CONFIG.userAgent! },
@@ -176,8 +199,19 @@ async function runSEOPreflight(
     if (verbose) console.error('Failed to fetch homepage:', error);
   }
 
+  if (homepageHtml) {
+    try {
+      const response = await fetch(baseUrl, {
+        headers: { 'User-Agent': MOBILE_USER_AGENT },
+      });
+      mobileHtml = await response.text();
+    } catch (error) {
+      if (verbose) console.error('Failed to fetch mobile homepage:', error);
+    }
+  }
+
   // Gate 3: Meta Tags
-  if (verbose) console.log('Gate 3/6: Meta Tags...');
+  if (verbose) console.log('Gate 3/8: Meta Tags...');
   const metaGate = await runGate('Meta Tags', async () => {
     if (!homepageHtml) {
       return [{
@@ -190,15 +224,41 @@ async function runSEOPreflight(
     const { checks } = validateMeta({
       html: homepageHtml,
       url: baseUrl,
+      mobileHtml,
       thresholds: CONFIG.thresholds,
     });
+
+    if (mobileHtml) {
+      const desktopWords = countVisibleWords(homepageHtml);
+      const mobileWords = countVisibleWords(mobileHtml);
+      if (desktopWords > 0) {
+        const ratio = mobileWords / desktopWords;
+        if (ratio < 0.7) {
+          checks.push({
+            name: 'Mobile Content Parity',
+            status: 'WARNING',
+            severity: 'MEDIUM',
+            message: `Mobile content is ${Math.round(ratio * 100)}% of desktop (${mobileWords} vs ${desktopWords} words)`,
+            fix: 'Ensure mobile content matches desktop content for indexing parity',
+          });
+        } else {
+          checks.push({
+            name: 'Mobile Content Parity',
+            status: 'PASSED',
+            severity: 'LOW',
+            message: `Mobile content parity OK (${mobileWords}/${desktopWords} words)`,
+          });
+        }
+      }
+    }
+
     return checks;
   });
   gates.push(metaGate);
   if (verbose) printGateResult(metaGate);
 
   // Gate 4: Canonical URLs
-  if (verbose) console.log('Gate 4/6: Canonical URLs...');
+  if (verbose) console.log('Gate 4/8: Canonical URLs...');
   const canonicalGate = await runGate('Canonical', async () => {
     if (!homepageHtml) {
       return [{
@@ -218,7 +278,7 @@ async function runSEOPreflight(
   if (verbose) printGateResult(canonicalGate);
 
   // Gate 5: JSON-LD Schema
-  if (verbose) console.log('Gate 5/6: JSON-LD Schema...');
+  if (verbose) console.log('Gate 5/8: JSON-LD Schema...');
   const schemaGate = await runGate('Schema', async () => {
     if (!homepageHtml) {
       return [{
@@ -231,15 +291,55 @@ async function runSEOPreflight(
     const { checks } = validateSchema({
       html: homepageHtml,
       url: baseUrl,
+      mobileHtml,
     });
     return checks;
   });
   gates.push(schemaGate);
   if (verbose) printGateResult(schemaGate);
 
-  // Gate 6: Performance (optional)
+  // Gate 6: Rendering parity (optional)
+  if (verbose) console.log('Gate 6/8: Rendering...');
+  const renderGate = await runGate('Rendering', async () => {
+    if (!homepageHtml) {
+      return [{
+        name: 'Rendering',
+        status: 'SKIPPED' as Status,
+        severity: 'MEDIUM' as const,
+        message: 'Could not fetch homepage',
+      }];
+    }
+    const { checks } = await validateRendering({
+      url: baseUrl,
+      userAgent: CONFIG.userAgent,
+      timeout: CONFIG.timeout,
+    });
+    return checks;
+  });
+  gates.push(renderGate);
+  if (verbose) printGateResult(renderGate);
+
+  // Gate 7: Lighthouse Checklist (optional)
+  if (includeLighthouse) {
+    if (verbose) console.log('Gate 7/8: Lighthouse Checklist...');
+    const lighthouseGate = await runGate('Lighthouse', async () => {
+      const { checks } = await validateLighthouse({
+        url: baseUrl,
+        strategy: 'mobile',
+        apiKey: process.env.PAGESPEED_API_KEY,
+        timeout: CONFIG.timeout,
+      });
+      return checks;
+    });
+    gates.push(lighthouseGate);
+    if (verbose) printGateResult(lighthouseGate);
+  } else if (verbose) {
+    console.log('Gate 7/8: Lighthouse Checklist... SKIPPED');
+  }
+
+  // Gate 8: Performance (optional)
   if (includePerformance) {
-    if (verbose) console.log('Gate 6/6: Performance...');
+    if (verbose) console.log('Gate 8/8: Performance...');
     const perfGate = await runGate('Performance', async () => {
       const { checks } = await validatePerformance(validatorOptions);
       return checks;
@@ -377,6 +477,7 @@ async function main() {
   const maxPagesArg = args.find((a) => a.startsWith('--max-pages='));
   const maxPages = maxPagesArg ? parseInt(maxPagesArg.split('=')[1], 10) : 10;
   const noPerf = args.includes('--no-perf');
+  const noLighthouse = args.includes('--no-lighthouse');
   const help = args.includes('--help') || args.includes('-h');
 
   if (help) {
@@ -391,6 +492,7 @@ Options:
   --max-pages=N     Maximum pages to crawl (default: 10)
   --json            Output JSON report instead of console
   --no-perf         Skip performance checks
+  --no-lighthouse   Skip Lighthouse checklist
   --help, -h        Show this help message
 
 Examples:
@@ -406,6 +508,7 @@ Examples:
       crawlPages,
       maxPages,
       includePerformance: !noPerf,
+      includeLighthouse: !noLighthouse,
       jsonOutput,
       verbose: !jsonOutput,
     });

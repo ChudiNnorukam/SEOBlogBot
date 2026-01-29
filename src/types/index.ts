@@ -22,6 +22,11 @@ export interface RobotsCheckResult extends McpCompatible {
   sitemapReferences: string[];
   issues: Issue[];
   userAgentRules: UserAgentRule[];
+  evaluatedUrls?: Array<{
+    url: string;
+    allowed: boolean;
+    matchedRule: string | null;
+  }>;
 }
 
 export interface UserAgentRule {

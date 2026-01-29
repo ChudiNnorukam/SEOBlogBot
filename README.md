@@ -4,7 +4,7 @@ MCP server providing SEO audit tools for Next.js App Router blogs, integrated wi
 
 ## Features
 
-6 SEO tools available as Claude Code MCP tools:
+8 SEO tools available as Claude Code MCP tools:
 
 | Tool | Description | Auth Required |
 |------|-------------|---------------|
@@ -13,7 +13,9 @@ MCP server providing SEO audit tools for Next.js App Router blogs, integrated wi
 | `validate-meta-tags` | Check title, description, OG, Twitter, X-Robots-Tag | No |
 | `analyze-core-web-vitals` | LCP, INP, CLS via PageSpeed API | No |
 | `check-indexing-status` | Google Search Console URL inspection | Yes |
+| `check-indexing-status-batch` | Batch URL inspection (max 20) | Yes |
 | `generate-schema-recommendation` | JSON-LD schema suggestions | No |
+| `audit-lighthouse` | Lighthouse checklist via PageSpeed Insights | No |
 
 ## Quick Start
 
@@ -64,6 +66,8 @@ Validate meta tags on https://myblog.com/my-post
 Analyze Core Web Vitals for https://myblog.com (mobile)
 
 Generate schema recommendations for https://myblog.com/about
+
+Run Lighthouse checklist on https://myblog.com (mobile)
 ```
 
 ## Google Search Console Setup

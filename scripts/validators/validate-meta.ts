@@ -6,6 +6,7 @@ import type { CheckResult, PageMetadata } from '../../lib/types';
 export interface MetaValidatorOptions {
   html: string;
   url: string;
+  mobileHtml?: string;
   thresholds?: {
     minTitleLength?: number;
     maxTitleLength?: number;
@@ -21,6 +22,69 @@ const DEFAULT_THRESHOLDS = {
   maxDescriptionLength: 160,
 };
 
+const HREFLANG_PATTERN = /^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/;
+
+type HreflangLink = {
+  hreflang: string;
+  href: string | null;
+};
+
+const parseAttributes = (tag: string): Record<string, string> => {
+  const attrs: Record<string, string> = {};
+  const attrRegex = /([^\s=]+)\s*=\s*["']([^"']*)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = attrRegex.exec(tag)) !== null) {
+    attrs[match[1].toLowerCase()] = match[2];
+  }
+  return attrs;
+};
+
+const extractHreflangLinks = (html: string): {
+  links: HreflangLink[];
+  alternatesWithoutHreflang: number;
+} => {
+  const linkTags = html.match(/<link\s+[^>]*>/gi) || [];
+  const links: HreflangLink[] = [];
+  let alternatesWithoutHreflang = 0;
+
+  for (const tag of linkTags) {
+    const attrs = parseAttributes(tag);
+    const rel = attrs.rel?.toLowerCase();
+    if (!rel || !rel.split(/\s+/).includes('alternate')) continue;
+
+    const hreflang = attrs.hreflang;
+    if (!hreflang) {
+      alternatesWithoutHreflang += 1;
+      continue;
+    }
+
+    links.push({ hreflang, href: attrs.href ?? null });
+  }
+
+  return { links, alternatesWithoutHreflang };
+};
+
+const extractBasicMeta = (html: string): {
+  title: string | null;
+  description: string | null;
+  canonical: string | null;
+  robots: string | null;
+} => {
+  const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  const descMatch =
+    html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i);
+  const canonicalMatch = html.match(/<link[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']/i);
+  const robotsMatch = html.match(/<meta[^>]*name=["']robots["'][^>]*content=["']([^"']+)["']/i);
+
+  return {
+    title: titleMatch?.[1]?.trim() ?? null,
+    description: descMatch?.[1]?.trim() ?? null,
+    canonical: canonicalMatch?.[1]?.trim() ?? null,
+    robots: robotsMatch?.[1]?.trim() ?? null,
+  };
+};
+
 /**
  * Extract and validate meta tags from HTML
  */
@@ -28,7 +92,7 @@ export function validateMeta(options: MetaValidatorOptions): {
   checks: CheckResult[];
   metadata: PageMetadata;
 } {
-  const { html, url, thresholds = DEFAULT_THRESHOLDS } = options;
+  const { html, url, mobileHtml, thresholds = DEFAULT_THRESHOLDS } = options;
   const checks: CheckResult[] = [];
 
   const metadata: PageMetadata = { url };
@@ -226,6 +290,14 @@ export function validateMeta(options: MetaValidatorOptions): {
       message: `Meta robots contains noindex: "${metadata.robots}"`,
       fix: 'Remove noindex or set robots.index = true in metadata',
     });
+  } else if (metadata.robots?.toLowerCase().includes('nofollow')) {
+    checks.push({
+      name: 'Meta Robots',
+      status: 'WARNING',
+      severity: 'HIGH',
+      message: `Meta robots contains nofollow: "${metadata.robots}"`,
+      fix: 'Remove nofollow unless intentionally blocking link equity',
+    });
   }
 
   // 7. H1 heading check
@@ -253,6 +325,126 @@ export function validateMeta(options: MetaValidatorOptions): {
       severity: 'HIGH',
       message: 'Single H1 heading present',
     });
+  }
+
+  // 8. Hreflang tags
+  const hreflangData = extractHreflangLinks(html);
+  const hreflangLinks = hreflangData.links;
+  const hreflangIssues: string[] = [];
+  let missingHrefCount = 0;
+  let invalidLangCount = 0;
+  let nonAbsoluteCount = 0;
+  let duplicateCount = 0;
+
+  if (hreflangLinks.length === 0 && hreflangData.alternatesWithoutHreflang === 0) {
+    checks.push({
+      name: 'Hreflang Tags',
+      status: 'SKIPPED',
+      severity: 'LOW',
+      message: 'No hreflang tags found (ok for single-language sites)',
+    });
+  } else {
+    const seen = new Map<string, Set<string>>();
+    const hasXDefault = hreflangLinks.some(link => link.hreflang.toLowerCase() === 'x-default');
+
+    for (const link of hreflangLinks) {
+      const lang = link.hreflang.trim();
+      const href = link.href?.trim() ?? null;
+
+      if (!HREFLANG_PATTERN.test(lang) && lang.toLowerCase() !== 'x-default') {
+        invalidLangCount += 1;
+      }
+
+      if (!href) {
+        missingHrefCount += 1;
+      } else if (!/^https?:\/\//i.test(href)) {
+        nonAbsoluteCount += 1;
+      }
+
+      if (!seen.has(lang)) {
+        seen.set(lang, new Set());
+      }
+      if (href) {
+        const bucket = seen.get(lang)!;
+        if (bucket.size > 0 && !bucket.has(href)) {
+          duplicateCount += 1;
+        }
+        bucket.add(href);
+      }
+    }
+
+    if (hreflangData.alternatesWithoutHreflang > 0) {
+      hreflangIssues.push(`${hreflangData.alternatesWithoutHreflang} alternate links missing hreflang`);
+    }
+    if (missingHrefCount > 0) hreflangIssues.push(`${missingHrefCount} hreflang links missing href`);
+    if (nonAbsoluteCount > 0) hreflangIssues.push(`${nonAbsoluteCount} hreflang links use non-absolute URLs`);
+    if (invalidLangCount > 0) hreflangIssues.push(`${invalidLangCount} invalid hreflang values`);
+    if (duplicateCount > 0) hreflangIssues.push(`${duplicateCount} duplicate hreflang entries`);
+    if (hreflangLinks.length > 1 && !hasXDefault) {
+      hreflangIssues.push('Missing x-default hreflang');
+    }
+
+    if (hreflangIssues.length > 0) {
+      checks.push({
+        name: 'Hreflang Tags',
+        status: 'WARNING',
+        severity: 'MEDIUM',
+        message: hreflangIssues.join('; '),
+        fix: 'Ensure hreflang uses valid language tags, absolute URLs, and includes x-default when appropriate',
+      });
+    } else {
+      checks.push({
+        name: 'Hreflang Tags',
+        status: 'PASSED',
+        severity: 'MEDIUM',
+        message: `${hreflangLinks.length} hreflang links validated`,
+      });
+    }
+  }
+
+  // 9. Mobile parity (metadata consistency)
+  if (mobileHtml) {
+    const mobileMeta = extractBasicMeta(mobileHtml);
+    const mismatches: string[] = [];
+
+    if (metadata.title && mobileMeta.title && metadata.title !== mobileMeta.title) {
+      mismatches.push('title differs on mobile');
+    } else if (metadata.title && !mobileMeta.title) {
+      mismatches.push('title missing on mobile');
+    }
+
+    if (metadata.description && mobileMeta.description && metadata.description !== mobileMeta.description) {
+      mismatches.push('description differs on mobile');
+    } else if (metadata.description && !mobileMeta.description) {
+      mismatches.push('description missing on mobile');
+    }
+
+    if (metadata.canonical && mobileMeta.canonical && metadata.canonical !== mobileMeta.canonical) {
+      mismatches.push('canonical differs on mobile');
+    } else if (metadata.canonical && !mobileMeta.canonical) {
+      mismatches.push('canonical missing on mobile');
+    }
+
+    if (metadata.robots && mobileMeta.robots && metadata.robots !== mobileMeta.robots) {
+      mismatches.push('robots meta differs on mobile');
+    }
+
+    if (mismatches.length > 0) {
+      checks.push({
+        name: 'Mobile Meta Parity',
+        status: 'WARNING',
+        severity: 'MEDIUM',
+        message: mismatches.join('; '),
+        fix: 'Ensure mobile and desktop serve consistent metadata for indexing parity',
+      });
+    } else {
+      checks.push({
+        name: 'Mobile Meta Parity',
+        status: 'PASSED',
+        severity: 'MEDIUM',
+        message: 'Mobile and desktop metadata match',
+      });
+    }
   }
 
   return { checks, metadata };

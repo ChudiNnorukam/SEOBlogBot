@@ -102,19 +102,19 @@ npx ts-node scripts/seo-preflight.ts http://localhost:3000
 
 Target: https://chudi-blog.vercel.app
 
-Gate 1/5: Sitemap Validation...
+Gate 1/8: Sitemap Validation...
   ✅ PASSED (234ms)
 
-Gate 2/5: Crawlability...
+Gate 2/8: Crawlability...
   ⚠️ WARNING (189ms)
 
-Gate 3/5: Meta Tags...
+Gate 3/8: Meta Tags...
   ⚠️ WARNING (456ms)
 
-Gate 4/5: Canonical URLs...
+Gate 4/8: Canonical URLs...
   ✅ PASSED (123ms)
 
-Gate 5/5: JSON-LD Schema...
+Gate 5/8: JSON-LD Schema...
   ⚠️ WARNING (345ms)
 
 ═══════════════════════════════════════════════════════════════
@@ -263,6 +263,30 @@ Report saved to seo-report.json
 - No structured data → No rich snippets
 - Invalid JSON → Schema ignored
 
+### Gate 6: Rendering Parity
+
+**What it checks:**
+- Rendered content vs raw HTML content parity
+- Detects JS-only content risks
+
+**Common issues:**
+- Critical content only appears after JS → Crawl/index delays
+
+### Gate 7: Lighthouse Checklist
+
+**What it checks:**
+- Lighthouse category scores (Performance, Accessibility, Best Practices, SEO, PWA)
+- Top failing audits below 90
+
+**Common issues:**
+- Low SEO or Best Practices scores → Fix individual audits
+
+### Gate 8: Performance
+
+**What it checks:**
+- TTFB, compression, cache headers (server-side)
+- CWV note (requires PSI or browser automation)
+
 ---
 
 ## Automated Fix Commands
@@ -345,3 +369,11 @@ diff seo-report-20240115.json seo-report-20240122.json
 | After content changes | As needed | Affected pages |
 | After config changes | As needed | Crawlability, indexability |
 | Monthly | 1st of month | Full audit + GSC comparison |
+Gate 6/8: Rendering Parity...
+  ⚠️ WARNING (512ms)
+
+Gate 7/8: Lighthouse Checklist...
+  ⚠️ WARNING (1200ms)
+
+Gate 8/8: Performance...
+  ✅ PASSED (210ms)

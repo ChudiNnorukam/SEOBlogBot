@@ -18,6 +18,9 @@
 | OG description present | MEDIUM | `og:description` on all pages |
 | OG image present | MEDIUM | `og:image` with valid URL |
 | Twitter card present | LOW | `twitter:card` meta tag |
+| Hreflang tags (if present) | MEDIUM | Valid `hreflang` values + absolute URLs |
+| Mobile meta parity | MEDIUM | Mobile and desktop metadata consistent |
+| Mobile content parity | MEDIUM | Mobile text content roughly matches desktop |
 
 ---
 
